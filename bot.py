@@ -15,44 +15,59 @@ def send_telegram_message(message):
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"Sent: {r.status_code}")
+        print(f"Telegram sent: {r.status_code}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Telegram error: {e}")
 
 def get_klines(symbol, interval, limit=3):
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        return requests.get(url, timeout=10).json()
-    except:
+        bar_map = {"1m": "1m", "15m": "15m", "1H": "1H", "1h": "1H", "2m": "2m"}
+        bar = bar_map.get(interval, interval)
+        inst = symbol.replace('USDT', '-USDT')
+        url = f"https://www.okx.com/api/v5/market/candles?instId={inst}&bar={bar}&limit={limit}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data.get("code") != "0":
+            print(f"OKX error: {data}")
+            return None
+        return list(reversed(data["data"]))
+    except Exception as e:
+        print(f"get_klines error: {e}")
         return None
 
 def get_change(symbol, interval, candles_back):
     klines = get_klines(symbol, interval, candles_back + 1)
-    if not klines:
+    if not klines or len(klines) < candles_back + 1:
         return 0, 0
-    old = float(klines[0][4])
-    new = float(klines[-1][4])
-    change = ((new - old) / old) * 100
-    return change, new
+    try:
+        old = float(klines[0][4])
+        new = float(klines[-1][4])
+        change = ((new - old) / old) * 100
+        return change, new
+    except Exception as e:
+        print(f"get_change parse error: {e}")
+        return 0, 0
 
 def get_avg_volume():
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=20"
-        data = requests.get(url, timeout=10).json()
-        volumes = [float(c[7]) for c in data]
+        klines = get_klines("BTCUSDT", "1m", 20)
+        if not klines:
+            return 0
+        volumes = [float(c[5]) for c in klines]
         return sum(volumes) / len(volumes)
     except:
         return 0
 
 def get_current_volume():
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1"
-        data = requests.get(url, timeout=10).json()
-        return float(data[0][7])
+        klines = get_klines("BTCUSDT", "1m", 1)
+        if not klines:
+            return 0
+        return float(klines[-1][5])
     except:
         return 0
 
-def get_alt_changes(interval="2m"):
+def get_alt_changes(interval="1m"):
     results = {}
     for sym in ALTCOINS:
         change, _ = get_change(sym, interval, 2)
@@ -66,7 +81,7 @@ def trend_label(value):
 
 c2m, price = get_change("BTCUSDT", "1m", 2)
 c15m, _ = get_change("BTCUSDT", "15m", 1)
-c1h, _ = get_change("BTCUSDT", "1h", 1)
+c1h, _ = get_change("BTCUSDT", "1H", 1)
 
 print(f"[{datetime.now().strftime('%H:%M:%S')}] BTC: ${price:,.2f} | 2m: {c2m:+.2f}% | 15m: {c15m:+.2f}% | 1h: {c1h:+.2f}%")
 
@@ -80,7 +95,7 @@ if abs(c2m) >= THRESHOLD_2MIN:
     vol_ratio = (cur_vol / avg_vol) if avg_vol else 0
     volume_ok = vol_ratio >= VOLUME_MULTIPLIER
 
-    alts = get_alt_changes("2m")
+    alts = get_alt_changes("1m")
     alt_confirms = sum(1 for ch in alts.values() if (ch * direction) >= ALT_THRESHOLD)
     alt_ok = alt_confirms >= 1
 
