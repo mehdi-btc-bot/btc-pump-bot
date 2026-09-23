@@ -14,13 +14,12 @@ WATCHLIST = [
 
 TIMEFRAME = "5m"
 VOLUME_MA_PERIOD = 20
-VOLUME_MULT = 1.3           # حجم باید 1.3x MA باشه
+VOLUME_MULT = 1.3
 FRACTAL_MODE = "3"
 USE_BODY = True
-FVG_FILTER = True
-FVG_DISTANCE = 3
-RECENT_BARS = 20            # OB باید توی 20 کندل اخیر باشه
-PROXIMITY_PCT = 0.5         # فاصله نزدیکی به OB (درصد)
+FVG_FILTER = False          # ← خاموش شد (فقط OB + حجم)
+RECENT_BARS = 20
+PROXIMITY_PCT = 0.5
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -86,11 +85,10 @@ def is_fractal_low(klines, i, mode="3"):
         l4 = float(klines[i+4][3])
         return l0 > l2 and l1 > l2 and l3 > l2 and l4 > l2
 
-def find_bearish_ob(klines, fractal_low_idx, fractal_low_price, mode="3", use_body=True, filter_fvg=True, fvg_distance=3):
+def find_bearish_ob(klines, fractal_low_idx, mode="3", use_body=True):
     n = len(klines) - 1
     max_high = float('-inf')
     ob_idx = None
-    gap_idx = None
     
     for k in range(n - 1, fractal_low_idx, -1):
         o = float(klines[k][1])
@@ -100,75 +98,41 @@ def find_bearish_ob(klines, fractal_low_idx, fractal_low_price, mode="3", use_bo
         if c > o and h > max_high:
             ob_idx = k
             max_high = h
-        
-        if k + 2 <= n:
-            c1 = float(klines[k+1][4])
-            l2 = float(klines[k+2][3])
-            if c1 < l2:
-                gap_idx = k + 2
     
     if ob_idx is None:
         return None
-    
-    if filter_fvg:
-        if gap_idx is None:
-            return None
-        if not (0 <= ob_idx - gap_idx <= fvg_distance):
-            return None
     
     candle = klines[ob_idx]
     o = float(candle[1])
     h = float(candle[2])
     l = float(candle[3])
     
-    if use_body:
-        btm = min(o, float(candle[4]))
-    else:
-        btm = l
-    
+    btm = min(o, float(candle[4])) if use_body else l
     return {"type": "bearish", "top": h, "btm": btm, "idx": ob_idx}
 
-def find_bullish_ob(klines, fractal_high_idx, fractal_high_price, mode="3", use_body=True, filter_fvg=True, fvg_distance=3):
+def find_bullish_ob(klines, fractal_high_idx, mode="3", use_body=True):
     n = len(klines) - 1
     min_low = float('inf')
     ob_idx = None
-    gap_idx = None
     
     for k in range(n - 1, fractal_high_idx, -1):
         o = float(klines[k][1])
-        h = float(klines[k][2])
         l = float(klines[k][3])
         c = float(klines[k][4])
         
         if c < o and l < min_low:
             ob_idx = k
             min_low = l
-        
-        if k + 2 <= n:
-            c1 = float(klines[k+1][4])
-            h2 = float(klines[k+2][2])
-            if c1 > h2:
-                gap_idx = k + 2
     
     if ob_idx is None:
         return None
-    
-    if filter_fvg:
-        if gap_idx is None:
-            return None
-        if not (0 <= ob_idx - gap_idx <= fvg_distance):
-            return None
     
     candle = klines[ob_idx]
     o = float(candle[1])
     h = float(candle[2])
     l = float(candle[3])
     
-    if use_body:
-        top = max(o, float(candle[4]))
-    else:
-        top = h
-    
+    top = max(o, float(candle[4])) if use_body else h
     return {"type": "bullish", "top": top, "btm": l, "idx": ob_idx}
 
 def check_symbol(symbol):
@@ -184,15 +148,16 @@ def check_symbol(symbol):
     if not vol_ma_series:
         return None
     
-    # ===== شرط 1: حجم کندل فعلی ≥ 1.3x MA =====
-    current_vol = volumes[-1]
-    current_vol_ma = vol_ma_series[-1]
-    vol_ratio = current_vol / current_vol_ma if current_vol_ma > 0 else 0
+    # ===== شرط 1: حجم کندل بسته شده قبلی ≥ 1.3x MA =====
+    # از -2 استفاده می‌کنیم چون -1 کندل فعلیه که هنوز بسته نشده
+    prev_vol = volumes[-2]
+    prev_vol_ma = vol_ma_series[-2]
+    vol_ratio = prev_vol / prev_vol_ma if prev_vol_ma > 0 else 0
     
     if vol_ratio < VOLUME_MULT:
         return None
     
-    # ===== شرط 2: OB فعال (تازه + قیمت نزدیک) =====
+    # ===== شرط 2: OB فعال =====
     recent_obs = []
     for i in range(max(0, n - 30), n):
         if is_fractal_high(klines, i, FRACTAL_MODE):
@@ -201,7 +166,7 @@ def check_symbol(symbol):
             
             for j in range(fh_idx + 1, n + 1):
                 if float(klines[j][4]) > fh_price:
-                    ob = find_bullish_ob(klines, fh_idx, fh_price, FRACTAL_MODE, USE_BODY, FVG_FILTER, FVG_DISTANCE)
+                    ob = find_bullish_ob(klines, fh_idx, FRACTAL_MODE, USE_BODY)
                     if ob and ob["idx"] >= n - RECENT_BARS:
                         recent_obs.append(ob)
                     break
@@ -212,7 +177,7 @@ def check_symbol(symbol):
             
             for j in range(fl_idx + 1, n + 1):
                 if float(klines[j][4]) < fl_price:
-                    ob = find_bearish_ob(klines, fl_idx, fl_price, FRACTAL_MODE, USE_BODY, FVG_FILTER, FVG_DISTANCE)
+                    ob = find_bearish_ob(klines, fl_idx, FRACTAL_MODE, USE_BODY)
                     if ob and ob["idx"] >= n - RECENT_BARS:
                         recent_obs.append(ob)
                     break
@@ -220,16 +185,13 @@ def check_symbol(symbol):
     if not recent_obs:
         return None
     
-    # چک نزدیکی قیمت به نزدیک‌ترین OB
     nearby_obs = []
     for ob in recent_obs:
         ob_top = ob["top"]
         ob_btm = ob["btm"]
         
-        # داخل OB
         if ob_btm <= current_price <= ob_top:
             nearby_obs.append(ob)
-        # نزدیک OB
         elif ob_top < current_price and (current_price - ob_top) / ob_top * 100 <= PROXIMITY_PCT:
             nearby_obs.append(ob)
         elif ob_btm > current_price and (ob_btm - current_price) / current_price * 100 <= PROXIMITY_PCT:
@@ -246,9 +208,7 @@ def check_symbol(symbol):
         "type": latest_ob["type"],
         "ob_top": latest_ob["top"],
         "ob_btm": latest_ob["btm"],
-        "vol_ratio": vol_ratio,
-        "vol_current": current_vol,
-        "vol_ma": current_vol_ma
+        "vol_ratio": vol_ratio
     }
 
 print(f"[{datetime.now().strftime('%H:%M:%S')}] بررسی {len(WATCHLIST)} ارز برای OB + حجم...")
@@ -271,11 +231,11 @@ for sig in signals:
     if sig["type"] == "bullish":
         emoji = "🟢"
         title = "Bullish OB — حمایت"
-        action = "حجم بالای MA + قیمت داخل/نزدیک OB حمایت"
+        action = "حجم کندل بسته شده بالای MA + قیمت داخل/نزدیک OB"
     else:
         emoji = "🔴"
         title = "Bearish OB — مقاومت"
-        action = "حجم بالای MA + قیمت داخل/نزدیک OB مقاومت"
+        action = "حجم کندل بسته شده بالای MA + قیمت داخل/نزدیک OB"
     
     msg = f"{emoji} <b>{title} — {symbol}</b>\n"
     msg += f"⏱ {datetime.now().strftime('%H:%M:%S')}\n\n"
@@ -283,8 +243,8 @@ for sig in signals:
     msg += f"📦 <b>Order Block:</b>\n"
     msg += f"   • محدوده: ${sig['ob_btm']:,.4f} — ${sig['ob_top']:,.4f}\n\n"
     msg += f"✅ <b>تأییدها:</b>\n"
-    msg += f"   • حجم: <b>{sig['vol_ratio']:.2f}x</b> MA\n"
-    msg += f"   • OB تازه فعال\n\n"
+    msg += f"   • حجم کندل بسته شده: <b>{sig['vol_ratio']:.2f}x</b> MA\n"
+    msg += f"   • قیمت داخل/نزدیک OB\n\n"
     msg += f"💡 <i>برو پای چارت و تأیید کن.</i>"
     
     send_telegram_message(msg)
