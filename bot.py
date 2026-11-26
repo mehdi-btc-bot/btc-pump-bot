@@ -1,250 +1,146 @@
-import requests
 import os
+import time
+import requests
+import pandas as pd
+import numpy as np
 from datetime import datetime
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
+# ⬇️ لیست ارزهای شما (استخراج شده از عکس‌ها) ⬇️
 WATCHLIST = [
-    "BTCUSDT", "SOLUSDT", "BCHUSDT", "SUIUSDT", "LTCUSDT", "UNIUSDT", "XRPUSDT",
-    "TRXUSDT", "DOGEUSDT", "DOTUSDT", "XLMUSDT", "BNBUSDT", "AVAXUSDT", "LINKUSDT",
-    "LDOUSDT", "XAUTUSDT", "OPUSDT", "ADAUSDT", "HYPEUSDT", "ETCUSDT", "APTUSDT",
-    "ETHUSDT", "FARTCOINUSDT", "TAOUSDT", "ZECUSDT", "INJUSDT", "DYDXUSDT", "CRVUSDT"
+    "TRBUSDT", "ETCUSDT", "APTUSDT", "FARTCOINUSDT", "TAOUSDT", 
+    "OPUSDT", "LDOUSDT", "HYPEUSDT", 
+    "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "ZECUSDT", 
+    "INJUSDT", "AAVEUSDT",
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BCHUSDT", "LTCUSDT", 
+    "XRPUSDT", "XLMUSDT", "BNBUSDT", "UNIUSDT", "SUIUSDT"
 ]
 
-TIMEFRAME = "5m"
-VOLUME_MA_PERIOD = 20
-VOLUME_MULT = 1.3
-FRACTAL_MODE = "3"
-USE_BODY = True
-FVG_FILTER = False          # ← خاموش شد (فقط OB + حجم)
-RECENT_BARS = 20
-PROXIMITY_PCT = 0.5
+TIMEFRAME = "15m"
+CHECK_INTERVAL_SECONDS = 60 * 2  # هر ۲ دقیقه کل لیست رو اسکن میکنه
+
+# تنظیمات اندیکاتورها
+RSI_LEN = 14
+RSI_SMA_LEN = 14
+VP_PERIOD = 300
+VP_BINS = 100
+
+# ذخیره زمان آخرین آلارم برای هر ارز (برای جلوگیری از اسپم)
+last_alerts = {}
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload, timeout=10)
-        print("Telegram sent")
+        requests.post(url, json=payload)
     except Exception as e:
-        print(f"TG error: {e}")
+        print(f"Error sending to Telegram: {e}")
 
-def get_klines(symbol, interval, limit=300):
-    try:
-        inst = symbol.replace('USDT', '-USDT')
-        url = f"https://www.okx.com/api/v5/market/candles?instId={inst}&bar={interval}&limit={limit}"
-        r = requests.get(url, timeout=10).json()
-        if r.get("code") != "0":
-            return None
-        return list(reversed(r["data"]))
-    except Exception as e:
-        print(f"get_klines error: {e}")
+def get_binance_data(symbol, interval, limit=500):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    response = requests.get(url)
+    if response.status_code != 200:
         return None
+    data = response.json()
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'])
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = df[col].astype(float)
+    return df
 
-def calculate_ma(values, period):
-    if len(values) < period:
-        return None
-    return [sum(values[i-period+1:i+1]) / period for i in range(period-1, len(values))]
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-def is_fractal_high(klines, i, mode="3"):
-    if mode == "3":
-        if i + 3 >= len(klines):
-            return False
-        h1 = float(klines[i+1][2])
-        h0 = float(klines[i][2])
-        h2 = float(klines[i+2][2])
-        h3 = float(klines[i+3][2])
-        return h0 < h1 and (h2 < h1 or (h2 == h1 and h3 < h2))
-    else:
-        if i + 5 >= len(klines):
-            return False
-        h0 = float(klines[i][2])
-        h1 = float(klines[i+1][2])
-        h2 = float(klines[i+2][2])
-        h3 = float(klines[i+3][2])
-        h4 = float(klines[i+4][2])
-        return h0 < h2 and h1 < h2 and h3 < h2 and h4 < h2
+def calculate_volume_profile_poc(df, period=300, bins=100):
+    recent_df = df.tail(period)
+    max_price = recent_df['high'].max()
+    min_price = recent_df['low'].min()
+    
+    if max_price == min_price:
+        return None, None, None
+    
+    step = (max_price - min_price) / bins
+    vol_bins = np.zeros(bins)
+    
+    for _, row in recent_df.iterrows():
+        close_p, vol = row['close'], row['volume']
+        for j in range(bins):
+            lower = min_price + step * j
+            upper = lower + step
+            if close_p <= upper + step*1.5 and close_p >= lower - step*1.5:
+                vol_bins[j] += vol
+                
+    poc_index = np.argmax(vol_bins)
+    poc_price = min_price + (step * poc_index) + (step / 2)
+    
+    # محدوده Order Block (کمی بالاتر و پایین تر از خط زرد)
+    ob_high = poc_price + step
+    ob_low = poc_price - step
+    
+    return poc_price, ob_high, ob_low
 
-def is_fractal_low(klines, i, mode="3"):
-    if mode == "3":
-        if i + 3 >= len(klines):
-            return False
-        l1 = float(klines[i+1][3])
-        l0 = float(klines[i][3])
-        l2 = float(klines[i+2][3])
-        l3 = float(klines[i+3][3])
-        return l0 > l1 and (l2 > l1 or (l2 == l1 and l3 > l2))
-    else:
-        if i + 5 >= len(klines):
-            return False
-        l0 = float(klines[i][3])
-        l1 = float(klines[i+1][3])
-        l2 = float(klines[i+2][3])
-        l3 = float(klines[i+3][3])
-        l4 = float(klines[i+4][3])
-        return l0 > l2 and l1 > l2 and l3 > l2 and l4 > l2
-
-def find_bearish_ob(klines, fractal_low_idx, mode="3", use_body=True):
-    n = len(klines) - 1
-    max_high = float('-inf')
-    ob_idx = None
-    
-    for k in range(n - 1, fractal_low_idx, -1):
-        o = float(klines[k][1])
-        h = float(klines[k][2])
-        c = float(klines[k][4])
-        
-        if c > o and h > max_high:
-            ob_idx = k
-            max_high = h
-    
-    if ob_idx is None:
-        return None
-    
-    candle = klines[ob_idx]
-    o = float(candle[1])
-    h = float(candle[2])
-    l = float(candle[3])
-    
-    btm = min(o, float(candle[4])) if use_body else l
-    return {"type": "bearish", "top": h, "btm": btm, "idx": ob_idx}
-
-def find_bullish_ob(klines, fractal_high_idx, mode="3", use_body=True):
-    n = len(klines) - 1
-    min_low = float('inf')
-    ob_idx = None
-    
-    for k in range(n - 1, fractal_high_idx, -1):
-        o = float(klines[k][1])
-        l = float(klines[k][3])
-        c = float(klines[k][4])
-        
-        if c < o and l < min_low:
-            ob_idx = k
-            min_low = l
-    
-    if ob_idx is None:
-        return None
-    
-    candle = klines[ob_idx]
-    o = float(candle[1])
-    h = float(candle[2])
-    l = float(candle[3])
-    
-    top = max(o, float(candle[4])) if use_body else h
-    return {"type": "bullish", "top": top, "btm": l, "idx": ob_idx}
-
-def check_symbol(symbol):
-    klines = get_klines(symbol, TIMEFRAME, 300)
-    if not klines or len(klines) < 100:
-        return None
-    
-    current_price = float(klines[-1][4])
-    n = len(klines) - 1
-    
-    volumes = [float(k[5]) for k in klines]
-    vol_ma_series = calculate_ma(volumes, VOLUME_MA_PERIOD)
-    if not vol_ma_series:
-        return None
-    
-    # ===== شرط 1: حجم کندل بسته شده قبلی ≥ 1.3x MA =====
-    # از -2 استفاده می‌کنیم چون -1 کندل فعلیه که هنوز بسته نشده
-    prev_vol = volumes[-2]
-    prev_vol_ma = vol_ma_series[-2]
-    vol_ratio = prev_vol / prev_vol_ma if prev_vol_ma > 0 else 0
-    
-    if vol_ratio < VOLUME_MULT:
-        return None
-    
-    # ===== شرط 2: OB فعال =====
-    recent_obs = []
-    for i in range(max(0, n - 30), n):
-        if is_fractal_high(klines, i, FRACTAL_MODE):
-            fh_price = float(klines[i+1][2]) if FRACTAL_MODE == "3" else float(klines[i+2][2])
-            fh_idx = i + 1 if FRACTAL_MODE == "3" else i + 2
+def check_signals():
+    for symbol in WATCHLIST:
+        try:
+            df = get_binance_data(symbol, TIMEFRAME, limit=500)
+            if df is None or len(df) < 20:
+                continue
+                
+            df['rsi'] = calculate_rsi(df, RSI_LEN)
+            df['rsi_sma'] = df['rsi'].rolling(window=RSI_SMA_LEN).mean()
             
-            for j in range(fh_idx + 1, n + 1):
-                if float(klines[j][4]) > fh_price:
-                    ob = find_bullish_ob(klines, fh_idx, FRACTAL_MODE, USE_BODY)
-                    if ob and ob["idx"] >= n - RECENT_BARS:
-                        recent_obs.append(ob)
-                    break
-        
-        if is_fractal_low(klines, i, FRACTAL_MODE):
-            fl_price = float(klines[i+1][3]) if FRACTAL_MODE == "3" else float(klines[i+2][3])
-            fl_idx = i + 1 if FRACTAL_MODE == "3" else i + 2
+            last_rsi = df['rsi'].iloc[-2]
+            last_sma = df['rsi_sma'].iloc[-2]
+            curr_rsi = df['rsi'].iloc[-1]
+            curr_sma = df['rsi_sma'].iloc[-1]
             
-            for j in range(fl_idx + 1, n + 1):
-                if float(klines[j][4]) < fl_price:
-                    ob = find_bearish_ob(klines, fl_idx, FRACTAL_MODE, USE_BODY)
-                    if ob and ob["idx"] >= n - RECENT_BARS:
-                        recent_obs.append(ob)
-                    break
-    
-    if not recent_obs:
-        return None
-    
-    nearby_obs = []
-    for ob in recent_obs:
-        ob_top = ob["top"]
-        ob_btm = ob["btm"]
-        
-        if ob_btm <= current_price <= ob_top:
-            nearby_obs.append(ob)
-        elif ob_top < current_price and (current_price - ob_top) / ob_top * 100 <= PROXIMITY_PCT:
-            nearby_obs.append(ob)
-        elif ob_btm > current_price and (ob_btm - current_price) / current_price * 100 <= PROXIMITY_PCT:
-            nearby_obs.append(ob)
-    
-    if not nearby_obs:
-        return None
-    
-    latest_ob = nearby_obs[-1]
-    
-    return {
-        "symbol": symbol,
-        "price": current_price,
-        "type": latest_ob["type"],
-        "ob_top": latest_ob["top"],
-        "ob_btm": latest_ob["btm"],
-        "vol_ratio": vol_ratio
-    }
+            rsi_cross = False
+            if not pd.isna(last_rsi) and not pd.isna(last_sma):
+                if last_rsi < last_sma and curr_rsi > curr_sma:
+                    rsi_cross = True
+                    
+            poc_price, ob_high, ob_low = calculate_volume_profile_poc(df, VP_PERIOD, VP_BINS)
+            
+            if poc_price is not None:
+                current_price = df['close'].iloc[-1]
+                current_high = df['high'].iloc[-1]
+                current_low = df['low'].iloc[-1]
+                
+                touch_poc = current_low <= poc_price <= current_high
+                
+                # شرط نهایی: کراس RSI + لمس خط زرد
+                if rsi_cross and touch_poc:
+                    now = time.time()
+                    # چک کردن که حداقل ۳۰ دقیقه از آخرین پیام برای این ارز گذشته باشه
+                    if symbol not in last_alerts or (now - last_alerts[symbol]) > 1800:
+                        
+                        # ساخت پیام شبیه به عکس شما
+                        msg = f"🟢 <b>Bullish OB — حمایت — {symbol.replace('USDT', '')}</b>\n"
+                        msg += f"⏱ <i>{datetime.now().strftime('%H:%M:%S')}</i>\n\n"
+                        msg += f"💰 <b>قیمت:</b> {current_price:.4f}$\n\n"
+                        msg += f"📦 <b>Order Block:</b>\n"
+                        msg += f"• محدوده: {ob_high:.4f}$ — {ob_low:.4f}$\n\n"
+                        msg += f"✅ <b>تاییدها:</b>\n"
+                        msg += f"• حجم کراس RSI: فعال\n"
+                        msg += f"• قیمت داخل/نزدیک POC (خط زرد)\n\n"
+                        msg += f"💡 برو پای چارت و تایید کن."
+                        
+                        send_telegram_message(msg)
+                        last_alerts[symbol] = now
+                        print(f"Signal sent for {symbol}")
+                        
+        except Exception as e:
+            print(f"Error checking {symbol}: {e}")
 
-print(f"[{datetime.now().strftime('%H:%M:%S')}] بررسی {len(WATCHLIST)} ارز برای OB + حجم...")
-
-signals = []
-for symbol in WATCHLIST:
-    try:
-        r = check_symbol(symbol)
-        if r:
-            signals.append(r)
-            print(f"  >> {symbol}: {r['type']} OB (Vol {r['vol_ratio']:.2f}x)")
-    except Exception as e:
-        print(f"  {symbol}: {e}")
-
-print(f"تعداد سیگنال: {len(signals)}")
-
-for sig in signals:
-    symbol = sig["symbol"].replace("USDT", "")
+if __name__ == "__main__":
+    print("Bot is running...")
+    send_telegram_message("✅ ربات شخصی‌سازی‌شده (چند ارزه) روشن شد و در حال رصد است.")
     
-    if sig["type"] == "bullish":
-        emoji = "🟢"
-        title = "Bullish OB — حمایت"
-        action = "حجم کندل بسته شده بالای MA + قیمت داخل/نزدیک OB"
-    else:
-        emoji = "🔴"
-        title = "Bearish OB — مقاومت"
-        action = "حجم کندل بسته شده بالای MA + قیمت داخل/نزدیک OB"
-    
-    msg = f"{emoji} <b>{title} — {symbol}</b>\n"
-    msg += f"⏱ {datetime.now().strftime('%H:%M:%S')}\n\n"
-    msg += f"💰 قیمت: <b>${sig['price']:,.4f}</b>\n\n"
-    msg += f"📦 <b>Order Block:</b>\n"
-    msg += f"   • محدوده: ${sig['ob_btm']:,.4f} — ${sig['ob_top']:,.4f}\n\n"
-    msg += f"✅ <b>تأییدها:</b>\n"
-    msg += f"   • حجم کندل بسته شده: <b>{sig['vol_ratio']:.2f}x</b> MA\n"
-    msg += f"   • قیمت داخل/نزدیک OB\n\n"
-    msg += f"💡 <i>برو پای چارت و تأیید کن.</i>"
-    
-    send_telegram_message(msg)
+    while True:
+        check_signals()
+        time.sleep(CHECK_INTERVAL_SECONDS)
