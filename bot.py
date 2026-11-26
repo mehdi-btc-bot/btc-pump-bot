@@ -8,26 +8,22 @@ from datetime import datetime
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# ⬇️ لیست ارزهای شما (استخراج شده از عکس‌ها) ⬇️
 WATCHLIST = [
     "TRBUSDT", "ETCUSDT", "APTUSDT", "FARTCOINUSDT", "TAOUSDT", 
-    "OPUSDT", "LDOUSDT", "HYPEUSDT", 
-    "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "ZECUSDT", 
-    "INJUSDT", "AAVEUSDT",
+    "OPUSDT", "LDOUSDT", "HYPEUSDT", "AVAXUSDT", "DOGEUSDT", 
+    "ADAUSDT", "LINKUSDT", "ZECUSDT", "INJUSDT", "AAVEUSDT",
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BCHUSDT", "LTCUSDT", 
     "XRPUSDT", "XLMUSDT", "BNBUSDT", "UNIUSDT", "SUIUSDT"
 ]
 
 TIMEFRAME = "15m"
-CHECK_INTERVAL_SECONDS = 60 * 2  # هر ۲ دقیقه کل لیست رو اسکن میکنه
-
-# تنظیمات اندیکاتورها
+CHECK_INTERVAL_SECONDS = 60 * 15  # هر ۱۵ دقیقه اسکن میکنه
 RSI_LEN = 14
 RSI_SMA_LEN = 14
 VP_PERIOD = 300
 VP_BINS = 100
 
-# ذخیره زمان آخرین آلارم برای هر ارز (برای جلوگیری از اسپم)
+# ذخیره زمان آخرین آلارم در حافظه ربات
 last_alerts = {}
 
 def send_telegram_message(message):
@@ -77,11 +73,8 @@ def calculate_volume_profile_poc(df, period=300, bins=100):
                 
     poc_index = np.argmax(vol_bins)
     poc_price = min_price + (step * poc_index) + (step / 2)
-    
-    # محدوده Order Block (کمی بالاتر و پایین تر از خط زرد)
     ob_high = poc_price + step
     ob_low = poc_price - step
-    
     return poc_price, ob_high, ob_low
 
 def check_signals():
@@ -113,13 +106,10 @@ def check_signals():
                 
                 touch_poc = current_low <= poc_price <= current_high
                 
-                # شرط نهایی: کراس RSI + لمس خط زرد
                 if rsi_cross and touch_poc:
                     now = time.time()
-                    # چک کردن که حداقل ۳۰ دقیقه از آخرین پیام برای این ارز گذشته باشه
-                    if symbol not in last_alerts or (now - last_alerts[symbol]) > 1800:
+                    if symbol not in last_alerts or (now - last_alerts[symbol]) > 1800: # 30 دقیقه
                         
-                        # ساخت پیام شبیه به عکس شما
                         msg = f"🟢 <b>Bullish OB — حمایت — {symbol.replace('USDT', '')}</b>\n"
                         msg += f"⏱ <i>{datetime.now().strftime('%H:%M:%S')}</i>\n\n"
                         msg += f"💰 <b>قیمت:</b> {current_price:.4f}$\n\n"
@@ -138,9 +128,11 @@ def check_signals():
             print(f"Error checking {symbol}: {e}")
 
 if __name__ == "__main__":
-    print("Bot is running...")
-    send_telegram_message("✅ ربات شخصی‌سازی‌شده (چند ارزه) روشن شد و در حال رصد است.")
+    print("Bot is starting on Render...")
+    # پیام تستی اولیه
+    send_telegram_message("✅ ربات روی سرور Render روشن شد و هر ۱۵ دقیقه بازار را رصد می‌کند.")
     
     while True:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning market...")
         check_signals()
         time.sleep(CHECK_INTERVAL_SECONDS)
